@@ -17,6 +17,8 @@ import ca.pfv.spmf.datastructures.collections.list.ListObject;
 import ca.pfv.spmf.datastructures.collections.map.AMapIntToLong;
 import ca.pfv.spmf.datastructures.collections.map.AMapIntToObject;
 import ca.pfv.spmf.datastructures.collections.map.LMapIntToObject;
+import ca.pfv.spmf.datastructures.collections.map.MapIntToLong.MapEntryIntToLong;
+import ca.pfv.spmf.datastructures.collections.map.MapIntToLong.EntryIterator;
 import ca.pfv.spmf.datastructures.collections.map.MapIntToObject;
 import ca.pfv.spmf.tools.MemoryLogger;
 
@@ -53,20 +55,29 @@ public class AlgoFHM_Inc {
         int iutils;
         int rutils;
         int pid;
-        int ppos; // Pointer to position in prefix's utility list
+        int Ppos; // NEW: Position pointer to parent element in previous item's utility list
 
-        public ElementAlgo3(int tid, int iutils, int rutils, int pid, int ppos) {
+        public ElementAlgo3(int tid, int iutils, int rutils, int pid) {
             this.tid = tid;
             this.iutils = iutils;
             this.rutils = rutils;
             this.pid = pid;
-            this.ppos = ppos;
+            this.Ppos = -1; // Default to -1 for first item or when no parent
+        }
+
+        public ElementAlgo3(int tid, int iutils, int rutils, int pid, int Ppos) {
+            this.tid = tid;
+            this.iutils = iutils;
+            this.rutils = rutils;
+            this.pid = pid;
+            this.Ppos = Ppos;
         }
     }
 
     class UtilityListFHM {
         int item;
         ListObject<ElementAlgo3> elements = new ArrayListObject<>();
+        MapIntToObject<ElementAlgo3> tidToElementMap = new LMapIntToObject<>();
         long sumIutils = 0;
         long sumRutils = 0;
 
@@ -77,6 +88,7 @@ public class AlgoFHM_Inc {
         public void addElement(ElementAlgo3 element) {
             element.pid = elements.size();
             elements.add(element);
+            tidToElementMap.put(element.tid, element);
             sumIutils += element.iutils;
             sumRutils += element.rutils;
         }
@@ -94,6 +106,7 @@ public class AlgoFHM_Inc {
         itemsetBuffer = new int[BUFFERS_SIZE];
         startTimestamp = System.currentTimeMillis();
         
+        // Reset counters
         huiCount = 0;
         candidateCount = 0;
         
@@ -112,6 +125,7 @@ public class AlgoFHM_Inc {
                 mapLeafMAP = new HashMap<>();
             }
 
+            // First pass: calculate TWU for each item
             try (BufferedReader myInput = new BufferedReader(new InputStreamReader(new FileInputStream(new File(input))))) {
                 String thisLine;
                 while ((thisLine = myInput.readLine()) != null) {
@@ -131,6 +145,7 @@ public class AlgoFHM_Inc {
                 }
             }
 
+            // Create utility lists for promising items
             ListObject<UtilityListFHM> listOfUtilityListFHMs = new ArrayListObject<>();
             MapIntToObject<UtilityListFHM> mapItemToUtilityListFHM = new LMapIntToObject<>();
             for (Map.Entry<Integer, Long> entry : mapItemToTWU.entrySet()) {
@@ -152,6 +167,7 @@ public class AlgoFHM_Inc {
 
             mapFMAP = new AMapIntToObject<>(mapItemToUtilityListFHM.size() + 100);
 
+            // Second pass: construct utility lists with Ppos optimization
             try (BufferedReader myInput = new BufferedReader(new InputStreamReader(new FileInputStream(new File(input))))) {
                 String thisLine;
                 int tid = 0;
@@ -193,13 +209,21 @@ public class AlgoFHM_Inc {
                             }
                         });
                         
+                        // Track previous utility list size for Ppos calculation
+                        int previousUtilityListSize = -1;
+                        
                         for (int i = 0; i < revisedTransaction.size(); i++) {
                             Pair pair = revisedTransaction.get(i);
                             remainingUtility -= pair.utility;
                             UtilityListFHM utilityListOfItem = mapItemToUtilityListFHM.get(pair.item);
                             if (utilityListOfItem != null) {
-                                ElementAlgo3 element = new ElementAlgo3(tid, pair.utility, remainingUtility, utilityListOfItem.elements.size(), -1);
+                                // Create element with Ppos pointing to previous item's utility list size
+                                ElementAlgo3 element = new ElementAlgo3(tid, pair.utility, remainingUtility, 
+                                    utilityListOfItem.elements.size(), previousUtilityListSize);
                                 utilityListOfItem.addElement(element);
+                                
+                                // Update previousUtilityListSize for next iteration
+                                previousUtilityListSize = utilityListOfItem.elements.size() - 1;
                                 
                                 AMapIntToLong mapFMAPItem = mapFMAP.get(pair.item);
                                 if (mapFMAPItem == null) {
@@ -279,14 +303,21 @@ public class AlgoFHM_Inc {
 
         for (int z = 0; z < px.elements.size(); z++) {
             ElementAlgo3 ex = px.elements.get(z);
+            
+            // Use Ppos to find corresponding element in py instead of findElementWithTID
             ElementAlgo3 ey = null;
-            for (int k = 0; k < py.elements.size(); k++) {
-                ElementAlgo3 candidate = py.elements.get(k);
+            if (ex.Ppos >= 0 && ex.Ppos < py.elements.size()) {
+                ElementAlgo3 candidate = py.elements.get(ex.Ppos);
                 if (candidate.tid == ex.tid) {
                     ey = candidate;
-                    break;
                 }
             }
+            
+            // If not found at Ppos, search in py using the tid map as fallback
+            if (ey == null) {
+                ey = py.tidToElementMap.get(ex.tid);
+            }
+            
             if (ey == null) {
                 if (ENABLE_LA_PRUNE) {
                     totalUtility -= (ex.iutils + ex.rutils);
@@ -296,14 +327,31 @@ public class AlgoFHM_Inc {
                 }
                 continue;
             }
+            
             if (P == null) {
-                ElementAlgo3 eXY = new ElementAlgo3(ex.tid, ex.iutils + ey.iutils, ey.rutils, pxyUL.elements.size(), -1);
+                // Set Ppos to the position of ex in px for the new element
+                ElementAlgo3 eXY = new ElementAlgo3(ex.tid, ex.iutils + ey.iutils, ey.rutils, 
+                    pxyUL.elements.size(), ex.pid);
                 pxyUL.addElement(eXY);
             } else {
-                int ppos = (px == P) ? ex.pid : ex.ppos;
-                if (ppos != -1 && ppos >= 0 && ppos < P.elements.size() && P.elements.get(ppos).tid == ex.tid) {
-                    ElementAlgo3 e = P.elements.get(ppos);
-                    ElementAlgo3 eXY = new ElementAlgo3(ex.tid, ex.iutils + ey.iutils - e.iutils, ey.rutils, pxyUL.elements.size(), ex.pid);
+                // Use Ppos to find corresponding element in P
+                ElementAlgo3 e = null;
+                if (ex.Ppos >= 0 && ex.Ppos < P.elements.size()) {
+                    ElementAlgo3 candidate = P.elements.get(ex.Ppos);
+                    if (candidate.tid == ex.tid) {
+                        e = candidate;
+                    }
+                }
+                
+                // If not found at Ppos, search in P using the tid map as fallback
+                if (e == null) {
+                    e = P.tidToElementMap.get(ex.tid);
+                }
+                
+                if (e != null) {
+                    // Set Ppos to the position of ex in px for the new element
+                    ElementAlgo3 eXY = new ElementAlgo3(ex.tid, ex.iutils + ey.iutils - e.iutils, 
+                        ey.rutils, pxyUL.elements.size(), ex.pid);
                     pxyUL.addElement(eXY);
                 }
             }
@@ -328,7 +376,7 @@ public class AlgoFHM_Inc {
     }
 
     public void printStats() throws IOException {
-        System.out.println("=============  Increment FHM ALGORITHM WITH PPOS - STATS =============");
+        System.out.println("=============  Increment FHM ALGORITHM WITH INDEX LIST ON ELEMENT 1.2 - SPMF 3.0  - STATS =============");
         System.out.println(" Total time ~ " + (endTimestamp - startTimestamp) + " ms");
         System.out.println(" Memory ~ " + MemoryLogger.getInstance().getMaxMemory() + " MB");
         System.out.println(" High-utility itemsets count : " + huiCount);
